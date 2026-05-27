@@ -1,4 +1,4 @@
-# DOT4 Flash Attention & Packed16 K Cache — Master Plan
+# DOT4 Flash Attention & Packed16 K Cache
 
 ## Part 1: Architecture & Performance
 
