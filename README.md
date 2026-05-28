@@ -39,17 +39,33 @@ A complete INT8 DOT4 (`sudot4`) FlashAttention kernel system for llama.cpp HIP o
 - **split-K**: Stage1 distributes K rows across CTAs (512-row splits), stage2 merges via online softmax
 - **Route table**: Committed in `fattn-dot4-q8k-decode.cuh` as the canonical contract
 
-## Decode Performance (7900 XTX, 27B Q4_K_M, 16k context, MTP model)
+## Decode Performance (7900 XTX, 27B Q4_K_M, parallel=1)
 
-| Route | Short ctx | Long ctx (15k) | VRAM @ 32k |
-|-------|:---------:|:--------------:|:----------:|
-| Standard FA (baseline) | — | 13 t/s | ~1568 MiB |
-| **Our packed16 + DOT4** | **30 t/s** (BN64) | **23 t/s** (split-K + MTP) | **~832 MiB (-68%)** |
+| Config | Prefill | Decode (15k ctx) | VRAM @ 32k |
+|--------|:---:|:---:|:---:|
+| Baseline q4_0 V (standard FA) | 117 t/s | **13 t/s** | ~960 MiB |
+| Baseline f16 V (standard FA) | 845 t/s | **29 t/s** | ~1568 MiB |
+| **Packed16 + q4_0 V (our system)** | 706 t/s | **23 t/s** | **~832 MiB** |
 
-- Short context: BN64 kernel, pure decode, ~200 rows → **30 t/s**
-- Long context with MTP: split-K kernel + draft model generation + MTP verify batches → **23 t/s**
-- The MTP draft/verify overhead accounts for the 30→23 gap at long context
-- **+77% over baseline q4_0 V** at long context (13→23 t/s)
+- **+77% over baseline q4_0 V** (13→23 t/s)
+- **79% of f16 V ceiling** (23/29)
+- Pure decode at short ctx (BN64, ~200 rows): **30 t/s**
+- Long ctx gap (30→23): MTP model draft+verify overhead, not our attention kernels
+- Attention timing: 0.68ms/call at 3.3k rows = 8.7% of decode budget
+- Full canonical env flags:
+  ```
+  GGML_CUDA_ROCM_Q8K_DOT4_PACKED16_K_CACHE=1
+  GGML_CUDA_ROCM_EXPERIMENTAL_UNSAFE=1
+  GGML_CUDA_ROCM_Q8K_DOT4_KQ=1
+  GGML_CUDA_FA_ROUTE_REQUIRE=rocm_q8k_dot4_kq
+  GGML_CUDA_ROCM_Q8K_DOT4_KQ_VARIANT=blockfa_recthist_v4_single
+  GGML_CUDA_ROCM_Q8K_DOT4_KQ_FULL_FA=1
+  GGML_CUDA_ROCM_Q8K_DOT4_BLOCKFA_ASSUME_CAUSAL=1
+  GGML_CUDA_ROCM_QUANT_PREFILL_F16=1
+  GGML_CUDA_ROCM_Q8K_DOT4_DECODE_BN=64
+  LLAMA_MTP_PREFILL_CHUNK=1024
+  LLAMA_MTP_PREFILL_FORCE_MMQ=1
+  ```
 
 ## Prefill Performance
 
@@ -79,9 +95,10 @@ Peaks at ~750 t/s at 8k. Dips to 709 at 15k (quadratic attention cost).
 The key discovery: single-CTA decode (BN64) drops to 24 t/s at 16k because one CTA/head processes all 3,328 K rows serially. Split-K distributes rows across CTAs:
 
 ```
-BN64 at short ctx:   30 t/s  (pure decode, ~200 rows)
-split-K at 15k ctx:  23 t/s  (MTP overhead from draft + verify)
-Baseline q4_0 V:     13 t/s  (standard FA, same model)
+BN64 at short ctx:   30 t/s  (pure decode, ~200 rows, no MTP overhead)
+split-K at 15k ctx:  24 t/s  (split-K + MTP draft/verify, still 2x baseline)
+Baseline q4_0 V:     13 t/s  (standard FA, same model, same flags)
+Baseline f16 V:      29 t/s  (ceiling — matmul/FFN/weight-dequant)
 ```
 
 Attention timing breakdown (per head group):
