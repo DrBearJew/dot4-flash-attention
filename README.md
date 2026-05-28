@@ -39,14 +39,17 @@ A complete INT8 DOT4 (`sudot4`) FlashAttention kernel system for llama.cpp HIP o
 - **split-K**: Stage1 distributes K rows across CTAs (512-row splits), stage2 merges via online softmax
 - **Route table**: Committed in `fattn-dot4-q8k-decode.cuh` as the canonical contract
 
-## Decode Performance (7900 XTX, 27B Q4_K_M, 15k context)
+## Decode Performance (7900 XTX, 27B Q4_K_M, 16k context, MTP model)
 
-| Route | q4_0 V | f16 V | VRAM @ 32k |
-|-------|:------:|:-----:|:----------:|
-| Standard FA (baseline) | 13 t/s | 31 t/s | ~1568 MiB |
-| **Our packed16 + DOT4** | **32 t/s** | — | **~832 MiB (-68%)** |
+| Route | Short ctx | Long ctx (15k) | VRAM @ 32k |
+|-------|:---------:|:--------------:|:----------:|
+| Standard FA (baseline) | — | 13 t/s | ~1568 MiB |
+| **Our packed16 + DOT4** | **30 t/s** (BN64) | **23 t/s** (split-K + MTP) | **~832 MiB (-68%)** |
 
-**32 t/s is the model decode floor** — the matmul/FFN/weight-dequant ceiling for 27B Q4_K_M on 7900 XTX. We match f16 V performance with q4_0 V using 68% less VRAM.
+- Short context: BN64 kernel, pure decode, ~200 rows → **30 t/s**
+- Long context with MTP: split-K kernel + draft model generation + MTP verify batches → **23 t/s**
+- The MTP draft/verify overhead accounts for the 30→23 gap at long context
+- **+77% over baseline q4_0 V** at long context (13→23 t/s)
 
 ## Prefill Performance
 
@@ -76,8 +79,9 @@ Peaks at ~750 t/s at 8k. Dips to 709 at 15k (quadratic attention cost).
 The key discovery: single-CTA decode (BN64) drops to 24 t/s at 16k because one CTA/head processes all 3,328 K rows serially. Split-K distributes rows across CTAs:
 
 ```
-Before (BN64 at 16k):   24 t/s
-After  (split-K):       32 t/s  ← flat from 512 to 16k
+BN64 at short ctx:   30 t/s  (pure decode, ~200 rows)
+split-K at 15k ctx:  23 t/s  (MTP overhead from draft + verify)
+Baseline q4_0 V:     13 t/s  (standard FA, same model)
 ```
 
 Attention timing breakdown (per head group):
